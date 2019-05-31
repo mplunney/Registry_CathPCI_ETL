@@ -1,0 +1,272 @@
+import os
+import pandas as pd
+from sqlalchemy import create_engine
+import pyexasol
+import time
+
+# start clock
+start_time = time.perf_counter()
+
+# set staging csv filenames
+EpisodeImport = 'episode.csv'
+CathLabVisitImport = 'cathlabvisit.csv'
+PreProdMedImport = 'preprodmed.csv'
+PCIMedsImport = 'pcimeds.csv'
+LesionImport = 'lesion.csv'
+DevicesImport = 'devices.csv'
+PPEventsImport = 'ppevents.csv'
+DischargeMedsImport = 'dischargemeds.csv'
+
+# set destination schema/table names
+destinationSchema = 'STAGING_BI'
+destinationEpisode = 'Registry_CathPCI_v5_Episode_Import'
+destinationCathLabVisit = 'Registry_CathPCI_v5_CathLabVisit_Import'
+destinationPreProdMed = 'Registry_CathPCI_v5_PreProdMed_Import'
+destinationPCIMeds = 'Registry_CathPCI_v5_PCIMeds_Import'
+destinationLesion = 'Registry_CathPCI_v5_Lesion_Import'
+destinationDevices = 'Registry_CathPCI_v5_Devices_Import'
+destinationPPEvents = 'Registry_CathPCI_v5_PPEvents_Import'
+destinationDischargeMeds = 'Registry_CathPCI_v5_DischargeMeds_Import'
+
+# set working directory
+os.chdir(r'\\CathPCI_v5')
+# get list of files in wd
+file_list = os.listdir()
+# groom file_list
+for file in file_list[:]:
+    # delete extant staging csvs
+    if file in (EpisodeImport, CathLabVisitImport, PreProdMedImport, PCIMedsImport, LesionImport, DevicesImport,
+                PPEventsImport, DischargeMedsImport):
+        os.remove(file)
+    # remove hidden/temporary files and files not Excel spreadsheets
+    elif '~$' in file or '.xlsx' not in file:
+        file_list.remove(file)
+
+# instantiate dict of lists for each facility
+facilities = {
+                'HOSPITALONE': [],
+                'HOSPITALTWO': [],
+                'HOSPITALTHREE': [],
+                'HOSPITALFOUR': []
+            }
+
+# iterate through facilities and filenames to append dict
+for file in file_list:
+    if '******' in file:
+        facilities['HOSPITALONE'].append(file)
+    elif '******' in file:
+        facilities['HOSPITALTWO'].append(file)
+    elif '******' in file:
+        facilities['HOSPITALTHREE'].append(file)
+    elif '******' in file:
+        facilities['HOSPITALFOUR'].append(file)
+
+
+# create function to parse spreadsheet tabs into individual data frames
+def parse_df(facility, filename, sheet):
+    with pd.ExcelFile(filename) as xlsx:
+        tab = pd.read_excel(xlsx, sheet_name=sheet, header=0,
+                            # cast dtypes for problem datetime fields
+                            dtype={'NCDRPatientID': object, 'OtherID': object, 'DCathNPI': object, 'PCINPI': object,
+                                   'SymptomTime': object},
+                            date_parser={'ArrivalDateTime', 'DCDateTime', 'ProcedureStartDateTime',
+                                         'ProcedureEndDateTime','EDPresentDateTime', 'ThromDateTime'})
+        # remove second row banner in source files
+        tab = tab.drop(0)
+        if sheet not in ['PreProdMed', 'PCIMeds', 'DischargeMeds']:
+            tab = tab.replace({'Yes': True, 'No': False})
+        tab = tab.assign(LocationNM=f'{facility}')
+        stageDF[(facility, filename, sheet)] = tab
+
+
+# list of sheets needed from Excel source files
+# sheet_list = ['Episode', 'CathLabVisit', 'StressTest', 'PreProdMed', 'ArtClose', 'ValveSten', 'ValveRegurg',
+#               'LesionSegmentNumber', 'GraftLesion', 'PCIMeds', 'Lesion', 'Devices', 'PPEvents', 'DischargeMeds']
+sheet_list = ['Episode', 'CathLabVisit', 'PreProdMed', 'PCIMeds', 'Lesion', 'Devices', 'PPEvents', 'DischargeMeds']
+stageDF = {}
+
+# parse sheets into data frames, one per sheet, per facility
+for facility, filenames in facilities.items():
+    for filename in filenames:
+        for sheet in sheet_list:
+            parse_df(facility, filename, sheet)
+
+# create destinations for each sheet/LOD
+lst_Episode = []
+lst_CathLabVisit = []
+lst_PreProdMed = []
+lst_PCIMeds = []
+lst_Lesion = []
+lst_Devices = []
+lst_PPEvents = []
+lst_DischargeMeds = []
+
+
+# iterate through data frames, concatenating to each LOD
+for facility, filename, sheet in stageDF:
+    if sheet == 'Episode':
+        lst_Episode.append(stageDF[facility, filename, 'Episode'])
+    elif sheet == 'CathLabVisit':
+        lst_CathLabVisit.append(stageDF[facility, filename, 'CathLabVisit'])
+    elif sheet == 'PreProdMed':
+        lst_PreProdMed.append(stageDF[facility, filename, 'PreProdMed'])
+    elif sheet == 'PCIMeds':
+        lst_PCIMeds.append(stageDF[facility, filename, 'PCIMeds'])
+    elif sheet == 'Lesion':
+        lst_Lesion.append(stageDF[facility, filename, 'Lesion'])
+    elif sheet == 'Devices':
+        lst_Devices.append(stageDF[facility, filename, 'Devices'])
+    elif sheet == 'PPEvents':
+        lst_PPEvents.append(stageDF[facility, filename, 'PPEvents'])
+    elif sheet == 'DischargeMeds':
+        lst_DischargeMeds.append(stageDF[facility, filename, 'DischargeMeds'])
+
+# combine lists of data frames into single DF at each LOD
+Episode = pd.concat(lst_Episode, sort=False)
+CathLabVisit = pd.concat(lst_CathLabVisit, sort=False)
+PreProdMed = pd.concat(lst_PreProdMed, sort=False)
+PCIMeds = pd.concat(lst_PCIMeds, sort=False)
+Lesion = pd.concat(lst_Lesion, sort=False)
+Devices = pd.concat(lst_Devices, sort=False)
+PPEvents = pd.concat(lst_PPEvents, sort=False)
+DischargeMeds = pd.concat(lst_DischargeMeds, sort=False)
+
+# combine lists of data frames into single DF at each LOD
+Episode.to_csv(EpisodeImport, index=False, encoding='utf-8', date_format='%Y-%m-%d %H:%M:%S.000000')
+CathLabVisit.to_csv(CathLabVisitImport, index=False, encoding='utf-8', date_format='%Y-%m-%d %H:%M:%S.000000')
+PreProdMed.to_csv(PreProdMedImport, index=False, encoding='utf-8', date_format='%Y-%m-%d %H:%M:%S.000000')
+PCIMeds.to_csv(PCIMedsImport, index=False, encoding='utf-8', date_format='%Y-%m-%d %H:%M:%S.000000')
+Lesion.to_csv(LesionImport, index=False, encoding='utf-8', date_format='%Y-%m-%d %H:%M:%S.000000')
+Devices.to_csv(DevicesImport, index=False, encoding='utf-8', date_format='%Y-%m-%d %H:%M:%S.000000')
+PPEvents.to_csv(PPEventsImport, index=False, encoding='utf-8', date_format='%Y-%m-%d %H:%M:%S.000000')
+DischargeMeds.to_csv(DischargeMedsImport, index=False, encoding='utf-8', date_format='%Y-%m-%d %H:%M:%S.000000')
+
+# time check
+process_time = time.perf_counter()
+print('\nFile processing successfully completed in ' + str(round((process_time - start_time), 2))+' seconds or ' +
+      str(round(((process_time - start_time)/60), 1))+' minutes')
+
+# instantiate sqlalchemy db connection
+engine = create_engine('exa+pyodbc://exasol')
+cx_ddl = engine.connect()
+
+# cx_ddl.execute(r'\\CathPCI\v5 Excel import\Archive import tables.sql')
+
+# create DDLs for destination tables, and change data types for Exasol compatibility
+ddl_Episode = pd.io.sql.get_schema(Episode.reset_index(), destinationEpisode, con=cx_ddl)
+ddl_Episode = ddl_Episode.replace('CREATE', 'CREATE OR REPLACE')
+ddl_Episode = ddl_Episode.replace('"index" BIGINT,', '')
+ddl_Episode = ddl_Episode.replace('BIGINT', 'DECIMAL(15,0)')
+ddl_Episode = ddl_Episode.replace('TEXT', 'VARCHAR(254) UTF8')
+ddl_Episode = ddl_Episode.replace('FLOAT', 'DECIMAL(15,3)')
+
+ddl_CathLabVisit = pd.io.sql.get_schema(CathLabVisit.reset_index(), destinationCathLabVisit, con=cx_ddl)
+ddl_CathLabVisit = ddl_CathLabVisit.replace('CREATE', 'CREATE OR REPLACE')
+ddl_CathLabVisit = ddl_CathLabVisit.replace('"index" BIGINT,', '')
+ddl_CathLabVisit = ddl_CathLabVisit.replace('BIGINT', 'DECIMAL(15,0)')
+ddl_CathLabVisit = ddl_CathLabVisit.replace('TEXT', 'VARCHAR(254) UTF8')
+ddl_CathLabVisit = ddl_CathLabVisit.replace('TIME,', 'VARCHAR(254) UTF8,')
+ddl_CathLabVisit = ddl_CathLabVisit.replace('FLOAT', 'DECIMAL(15,3)')
+
+ddl_PreProdMed = pd.io.sql.get_schema(PreProdMed.reset_index(), destinationPreProdMed, con=cx_ddl)
+ddl_PreProdMed = ddl_PreProdMed.replace('CREATE', 'CREATE OR REPLACE')
+ddl_PreProdMed = ddl_PreProdMed.replace('"index" BIGINT,', '')
+ddl_PreProdMed = ddl_PreProdMed.replace('BIGINT', 'DECIMAL(15,0)')
+ddl_PreProdMed = ddl_PreProdMed.replace('TEXT', 'VARCHAR(254) UTF8')
+ddl_PreProdMed = ddl_PreProdMed.replace('FLOAT', 'DECIMAL(15,3)')
+
+ddl_PCIMeds = pd.io.sql.get_schema(PCIMeds.reset_index(), destinationPCIMeds, con=cx_ddl)
+ddl_PCIMeds = ddl_PCIMeds.replace('CREATE', 'CREATE OR REPLACE')
+ddl_PCIMeds = ddl_PCIMeds.replace('"index" BIGINT,', '')
+ddl_PCIMeds = ddl_PCIMeds.replace('BIGINT', 'DECIMAL(15,0)')
+ddl_PCIMeds = ddl_PCIMeds.replace('TEXT', 'VARCHAR(254) UTF8')
+ddl_PCIMeds = ddl_PCIMeds.replace('FLOAT', 'DECIMAL(15,3)')
+
+ddl_Lesion = pd.io.sql.get_schema(Lesion.reset_index(), destinationLesion, con=cx_ddl)
+ddl_Lesion = ddl_Lesion.replace('CREATE', 'CREATE OR REPLACE')
+ddl_Lesion = ddl_Lesion.replace('"index" BIGINT,', '')
+ddl_Lesion = ddl_Lesion.replace('BIGINT', 'DECIMAL(15,0)')
+ddl_Lesion = ddl_Lesion.replace('TEXT', 'VARCHAR(254) UTF8')
+ddl_Lesion = ddl_Lesion.replace('FLOAT', 'DECIMAL(15,3)')
+
+ddl_Devices = pd.io.sql.get_schema(Devices.reset_index(), destinationDevices, con=cx_ddl)
+ddl_Devices = ddl_Devices.replace('CREATE', 'CREATE OR REPLACE')
+ddl_Devices = ddl_Devices.replace('"index" BIGINT,', '')
+ddl_Devices = ddl_Devices.replace('BIGINT', 'VARCHAR(254) UTF8')
+ddl_Devices = ddl_Devices.replace('TEXT', 'VARCHAR(254) UTF8')
+ddl_Devices = ddl_Devices.replace('FLOAT', 'VARCHAR(254) UTF8')
+
+ddl_PPEvents = pd.io.sql.get_schema(PPEvents.reset_index(), destinationPPEvents, con=cx_ddl)
+ddl_PPEvents = ddl_PPEvents.replace('CREATE', 'CREATE OR REPLACE')
+ddl_PPEvents = ddl_PPEvents.replace('"index" BIGINT,', '')
+ddl_PPEvents = ddl_PPEvents.replace('BIGINT', 'DECIMAL(15,0)')
+ddl_PPEvents = ddl_PPEvents.replace('TEXT', 'VARCHAR(254) UTF8')
+ddl_PPEvents = ddl_PPEvents.replace('FLOAT', 'DECIMAL(15,3)')
+
+ddl_DischargeMeds = pd.io.sql.get_schema(DischargeMeds.reset_index(), destinationDischargeMeds, con=cx_ddl)
+ddl_DischargeMeds = ddl_DischargeMeds.replace('CREATE', 'CREATE OR REPLACE')
+ddl_DischargeMeds = ddl_DischargeMeds.replace('"index" BIGINT,', '')
+ddl_DischargeMeds = ddl_DischargeMeds.replace('BIGINT', 'VARCHAR(254) UTF8')
+ddl_DischargeMeds = ddl_DischargeMeds.replace('TEXT', 'VARCHAR(254) UTF8')
+ddl_DischargeMeds = ddl_DischargeMeds.replace('FLOAT', 'VARCHAR(254) UTF8')
+
+# run DDLs to create destination tables
+cx_ddl.execute(f'''OPEN SCHEMA {destinationSchema};''')
+cx_ddl.execute(ddl_Episode)
+cx_ddl.execute(ddl_CathLabVisit)
+cx_ddl.execute(ddl_PreProdMed)
+cx_ddl.execute(ddl_PCIMeds)
+cx_ddl.execute(ddl_Lesion)
+cx_ddl.execute(ddl_Devices)
+cx_ddl.execute(ddl_PPEvents)
+cx_ddl.execute(ddl_DischargeMeds)
+cx_ddl.close()
+
+# time check
+db_time = time.perf_counter()
+print('\nDatabase preparations for import successfully completed in ' + str(round((db_time - process_time), 2)) +
+      ' seconds -- current runtime ' + str(round((db_time - start_time), 2)) + ' seconds or ' +
+      str(round(((db_time - start_time)/60), 1))+' minutes')
+
+# instantiate pyexasol connection
+DSN = 'exasol'
+pwFile = '//p.txt'
+pwf = open(pwFile)
+pw = pwf.read()
+pwf.close()
+cx_csv = pyexasol.connect(dsn=DSN, user='******', password=pw, schema=destinationSchema, compression=True, quote_ident=True)
+
+# import csv to destination table and count records
+cx_csv.import_from_file(open(EpisodeImport, 'rb'), destinationEpisode, import_params={'skip': 1})
+cx_csv.import_from_file(open(CathLabVisitImport, 'rb'), destinationCathLabVisit, import_params={'skip': 1})
+cx_csv.import_from_file(open(PreProdMedImport, 'rb'), destinationPreProdMed, import_params={'skip': 1})
+cx_csv.import_from_file(open(PCIMedsImport, 'rb'), destinationPCIMeds, import_params={'skip': 1})
+cx_csv.import_from_file(open(LesionImport, 'rb'), destinationLesion, import_params={'skip': 1})
+cx_csv.import_from_file(open(DevicesImport, 'rb'), destinationDevices, import_params={'skip': 1})
+cx_csv.import_from_file(open(PPEventsImport, 'rb'), destinationPPEvents, import_params={'skip': 1})
+cx_csv.import_from_file(open(DischargeMedsImport, 'rb'), destinationDischargeMeds, import_params={'skip': 1})
+
+# get imported record counts
+countEpisode = cx_csv.execute(f'''SELECT COUNT(*) FROM {destinationSchema}."{destinationEpisode}";''').fetchone()
+countCathLabVisit = cx_csv.execute(f'''SELECT COUNT(*) FROM {destinationSchema}."{destinationCathLabVisit}";''').fetchone()
+countPreProdMed = cx_csv.execute(f'''SELECT COUNT(*) FROM {destinationSchema}."{destinationPreProdMed}";''').fetchone()
+countPCIMeds = cx_csv.execute(f'''SELECT COUNT(*) FROM {destinationSchema}."{destinationPCIMeds}";''').fetchone()
+countLesion = cx_csv.execute(f'''SELECT COUNT(*) FROM {destinationSchema}."{destinationLesion}";''').fetchone()
+countDevices = cx_csv.execute(f'''SELECT COUNT(*) FROM {destinationSchema}."{destinationDevices}";''').fetchone()
+countPPEvents = cx_csv.execute(f'''SELECT COUNT(*) FROM {destinationSchema}."{destinationPPEvents}";''').fetchone()
+countDischargeMeds = cx_csv.execute(f'''SELECT COUNT(*) FROM {destinationSchema}."{destinationDischargeMeds}";''').fetchone()
+cx_csv.close()
+
+# print stats
+end_time = time.perf_counter()
+print('\nAll data successfully imported in ' + str(round(end_time - db_time, 2)) + ' seconds:\n\t' +
+        str(countEpisode[0]) + ' "Episode" records\n\t' +
+        str(countCathLabVisit[0]) + ' "CathLabVisit" records\n\t' +
+        str(countPreProdMed[0]) + ' "PreProdMed" records\n\t' +
+        str(countPCIMeds[0]) + ' "PCIMeds" records\n\t' +
+        str(countLesion[0]) + ' "Lesion" records\n\t' +
+        str(countDevices[0]) + ' "Devices" records\n\t' +
+        str(countPPEvents[0]) + ' "PPEvents" records\n\t' +
+        str(countDischargeMeds[0]) + ' "DischargeMeds" records\n' +
+        'Total program runtime was ' + str(round(end_time - start_time, 2)) + ' seconds or ' +
+        str(round((end_time - start_time)/60, 1))+' minutes')
